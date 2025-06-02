@@ -11,69 +11,14 @@ import (
 )
 
 type finder struct {
-	root	string
-	finds 	chan searchItem
-	wp 		*workerPool
+	finds 		chan searchItem
+	semaphore 	chan struct{}
+	wg			*sync.WaitGroup
 }
 
 type searchItem struct {
 	name string
 	path string
-}
-
-type workerPool struct {
-	tasks 		chan func()
-	tasksQueue 	chan func()
-	wg 			*sync.WaitGroup
-	quit		chan struct{}
-}
-
-func newWorkerPool(poolSize int) *workerPool {
-	wp := &workerPool{
-		tasks: make(chan func(), poolSize),
-		tasksQueue: make(chan func(), poolSize * 10),
-		wg: new(sync.WaitGroup),
-		quit: make(chan struct{}),
-	}
-	go func() {
-		for {
-			select {
-			case task := <- wp.tasksQueue:
-				wp.tasks <- task
-			case <- wp.quit:
-				return
-			}
-		}
-	}()
-	for range poolSize {
-		go func() {
-			for {
-				select {
-				case task, ok := <- wp.tasks:
-					if !ok {
-						return
-					}
-					task()
-				case <- wp.quit:
-					return
-				}
-			}
-		}()
-	}
-	return wp
-}
-
-func (wp *workerPool) wait() {
-	wp.wg.Wait()
-	close(wp.quit)
-}
-
-func (wp *workerPool) submit(task func()) {
-	wp.wg.Add(1)
-	wp.tasksQueue <- func() {
-		defer wp.wg.Done()
-		task()
-	}
 }
 
 func main() {
@@ -99,19 +44,6 @@ func main() {
 		}
 	}
 
-	f := &finder{
-		finds: make(chan searchItem),
-		root: exPath,
-		wp: newWorkerPool(100),
-	}
-	defer f.wp.wait()
-
-	go func() {
-		for result := range f.finds {
-			fmt.Printf("file: %s, exist in: %s\n", result.name, result.path)
-		}
-	}()
-
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("> ")
@@ -123,13 +55,31 @@ func main() {
 		if query == "q" {
 			return
 		}
-		f.wp.submit(func() {
-			f.walkTo(f.root, query)
-		})
+
+		f := &finder{
+			finds:     make(chan searchItem),
+			semaphore: make(chan struct{}, 100),
+			wg:        new(sync.WaitGroup),
+		}
+
+		go func() {
+			for result := range f.finds {
+				fmt.Printf("file: %s, exist in: %s\n", result.name, result.path)
+			}
+		}()
+
+		f.semaphore <- struct{}{}
+		f.wg.Add(1)
+		go f.walkTo(exPath, query)
+
+		f.wg.Wait()
+		close(f.finds)
 	}
 }
 
 func (f *finder) walkTo(path, query string) {
+	defer f.wg.Done()
+
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return
@@ -137,9 +87,18 @@ func (f *finder) walkTo(path, query string) {
 
 	for _, entry := range entries {
 		if entry.IsDir() {
-			f.wp.submit(func() {
+			select{
+			case f.semaphore <- struct{}{}:
+				f.wg.Add(1)
+				go func() {
+					defer func() {<- f.semaphore}()
+					f.walkTo(filepath.Join(path, entry.Name()), query)
+				}()
+
+			default:
+				f.wg.Add(1)
 				f.walkTo(filepath.Join(path, entry.Name()), query)
-			})
+			}
 		} else {
 			if entry.Name() == query {
 				f.finds <- searchItem{
