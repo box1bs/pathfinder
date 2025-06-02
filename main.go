@@ -123,7 +123,9 @@ func main() {
 		if query == "q" {
 			return
 		}
-		f.walkTo(f.root, query)
+		f.wp.submit(func() {
+			f.walkTo(f.root, query)
+		})
 	}
 }
 
@@ -135,7 +137,7 @@ func (f *finder) walkTo(path, query string) {
 
 	for _, entry := range entries {
 		if entry.IsDir() {
-			go f.wp.submit(func() {
+			f.wp.submit(func() {
 				f.walkTo(filepath.Join(path, entry.Name()), query)
 			})
 		} else {
